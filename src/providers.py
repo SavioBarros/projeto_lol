@@ -166,15 +166,9 @@ class PandaScoreProvider:
         rate_limit = int(os.getenv("RATE_LIMIT_REQUESTS_PER_MINUTE", "30"))
         self.rate_limiter = RateLimiter(max_requests=rate_limit, time_window=60)
         
-        # Configurar ligas monitoradas
-        leagues_config = os.getenv("MONITORED_LEAGUES", "")
-        if leagues_config.strip():
-            self.monitored_leagues = [l.strip().lower() for l in leagues_config.split(",")]
-            logger.info(f"🏆 Ligas monitoradas: {self.monitored_leagues}")
-        else:
-            self.monitored_leagues = []
-            logger.info("🏆 Monitorando todas as ligas disponíveis")
-            
+        # CORREÇÃO: Configurar ligas monitoradas com validação
+        self.monitored_leagues = self._parse_monitored_leagues()
+        
         # Configurar tipos de mercado
         markets_config = os.getenv("MARKET_TYPES", "")
         if markets_config.strip():
@@ -187,6 +181,45 @@ class PandaScoreProvider:
         
         logger.info(f"✅ PandaScoreProvider inicializado - Token: {self.api_token[:8] if self.api_token else 'NENHUM'}...")
     
+    def _parse_monitored_leagues(self) -> List[str]:
+        """CORREÇÃO: Parse mais robusto das ligas monitoradas"""
+        leagues_config = os.getenv("MONITORED_LEAGUES", "").strip()
+        
+        if not leagues_config:
+            logger.info("🏆 Nenhuma liga específica configurada - monitorando todas")
+            return []
+        
+        # Parse e validação dos slugs
+        raw_leagues = [l.strip().lower() for l in leagues_config.split(",")]
+        valid_leagues = []
+        
+        # Slugs conhecidos válidos para LoL
+        known_valid_slugs = {
+            'lck', 'lpl', 'lec', 'lcs', 'worlds', 'msi', 'cblol',
+            'lck-spring', 'lpl-spring', 'lec-spring', 'lcs-spring',
+            'lck-summer', 'lpl-summer', 'lec-summer', 'lcs-summer',
+            'worlds-2024', 'msi-2024'
+        }
+        
+        for league in raw_leagues:
+            if not league:
+                continue
+            
+            # Validar formato básico do slug
+            if re.match(r'^[a-z0-9-]+$', league) and len(league) >= 3:
+                valid_leagues.append(league)
+                if league not in known_valid_slugs:
+                    logger.warning(f"⚠️ Liga '{league}' não está na lista de slugs conhecidos")
+            else:
+                logger.warning(f"⚠️ Slug inválido ignorado: '{league}'")
+        
+        if valid_leagues:
+            logger.info(f"🏆 Ligas monitoradas: {valid_leagues}")
+        else:
+            logger.warning("⚠️ Nenhuma liga válida encontrada - monitorando todas")
+        
+        return valid_leagues
+    
     def _validate_config(self):
         """Validar configurações do provider"""
         if not self.api_token:
@@ -194,7 +227,11 @@ class PandaScoreProvider:
             raise ValueError("Token PandaScore obrigatório")
             
         if len(self.api_token) < 20:
-            logger.warning("⚠️  Token PandaScore parece inválido (muito curto)")
+            logger.warning("⚠️ Token PandaScore parece inválido (muito curto)")
+        
+        # Validar formato básico do token
+        if not re.match(r'^[a-zA-Z0-9_-]{20,}$', self.api_token):
+            logger.warning("⚠️ Formato do token PandaScore pode estar incorreto")
     
     def get_odds_for_matches(self):
         """Método original para compatibilidade - agora usa async internamente"""
@@ -222,16 +259,71 @@ class PandaScoreProvider:
         return await self._fetch_matches_by_status("finished")
 
     async def _fetch_matches_by_status(self, status: str, retries: int = 0) -> List[Dict]:
-        """Busca partidas por status específico com retry automático"""
+        """CORREÇÃO: Busca partidas por status específico com fallback"""
         
         # Aplicar rate limiting
         await self.rate_limiter.acquire()
         
-        # Construir URL e parâmetros
-        url = f"{self.base_url}/{self.game}/matches/{status}"
-        params = self._build_request_params()
+        # Tentar primeiro com filtros (se configurados)
+        if self.monitored_leagues:
+            matches = await self._fetch_with_league_filter(status, retries)
+            if matches is not None:  # None indica erro, lista vazia é válida
+                return matches
         
-        logger.debug(f"🔍 Fazendo requisição: {url} com params: {params}")
+        # Fallback: buscar sem filtros
+        logger.info(f"🔄 Buscando {status} matches sem filtros como fallback...")
+        return await self._fetch_without_filters(status, retries)
+    
+    async def _fetch_with_league_filter(self, status: str, retries: int = 0) -> Optional[List[Dict]]:
+        """Busca partidas com filtro de liga"""
+        url = f"{self.base_url}/{self.game}/matches/{status}"
+        params = {
+            "sort": "begin_at",
+            "per_page": str(self.per_page),
+            "filter[league_slug]": ",".join(self.monitored_leagues)
+        }
+        
+        try:
+            result = await self._make_request(url, params)
+            if result:
+                logger.info(f"✅ {len(result)} partidas {status} encontradas com filtros")
+                return self._format_matches(result, status)
+            return []
+            
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 400:
+                logger.warning(f"⚠️ Erro 400 com filtros - tentando fallback sem filtros")
+                return None  # Sinaliza para tentar fallback
+            else:
+                raise
+    
+    async def _fetch_without_filters(self, status: str, retries: int = 0) -> List[Dict]:
+        """Busca partidas sem filtros de liga"""
+        url = f"{self.base_url}/{self.game}/matches/{status}"
+        params = {
+            "sort": "begin_at", 
+            "per_page": str(self.per_page)
+        }
+        
+        try:
+            result = await self._make_request(url, params)
+            if result:
+                formatted = self._format_matches(result, status)
+                # Aplicar filtro manual se necessário
+                if self.monitored_leagues:
+                    filtered = [m for m in formatted if m.get('league_slug') in self.monitored_leagues]
+                    logger.info(f"📊 {len(filtered)} partidas após filtro manual de {len(formatted)}")
+                    return filtered
+                return formatted
+            return []
+            
+        except Exception as e:
+            logger.error(f"❌ Erro ao buscar sem filtros: {e}")
+            return []
+    
+    async def _make_request(self, url: str, params: Dict, retries: int = 0) -> Optional[List[Dict]]:
+        """Faz requisição HTTP com retry automático"""
+        logger.debug(f"🔗 Fazendo requisição: {url} com params: {params}")
         
         try:
             async with httpx.AsyncClient(
@@ -245,24 +337,7 @@ class PandaScoreProvider:
                 logger.debug(f"📡 Status: {response.status_code}, URL: {response.url}")
                 
                 # Tratamento de erros específicos
-                if response.status_code == 400:
-                    logger.error(f"❌ Erro 400 - Parâmetros inválidos: {response.text[:300]}")
-                    return []
-                elif response.status_code == 401:
-                    logger.error(f"❌ Erro 401 - Token inválido ou expirado")
-                    return []
-                elif response.status_code == 403:
-                    logger.error(f"❌ Erro 403 - Acesso negado. Verifique permissões do token")
-                    return []
-                elif response.status_code == 404:
-                    logger.warning(f"⚠️  Endpoint não encontrado para status '{status}'")
-                    return []
-                elif response.status_code == 429:
-                    logger.warning(f"⚠️  Rate limit atingido. Aguardando...")
-                    await asyncio.sleep(60)  # Aguardar 1 minuto
-                    if retries < self.max_retries:
-                        return await self._fetch_matches_by_status(status, retries + 1)
-                    return []
+                await self._handle_response_errors(response)
                 
                 response.raise_for_status()
                 matches_data = response.json()
@@ -271,29 +346,39 @@ class PandaScoreProvider:
                     logger.error(f"❌ Formato de resposta inesperado: {type(matches_data)}")
                     return []
                 
-                logger.info(f"✅ Encontradas {len(matches_data)} partidas {status}")
-                formatted_matches = self._format_matches(matches_data, status)
-                
-                logger.info(f"📊 {len(formatted_matches)} partidas após filtragem")
-                return formatted_matches
+                return matches_data
                 
         except httpx.TimeoutException:
-            logger.warning(f"⏰ Timeout na requisição para status '{status}'")
+            logger.warning(f"⏰ Timeout na requisição")
             if retries < self.max_retries:
                 await asyncio.sleep(2 ** retries)  # Backoff exponencial
-                return await self._fetch_matches_by_status(status, retries + 1)
+                return await self._make_request(url, params, retries + 1)
             return []
             
         except httpx.HTTPStatusError as e:
-            logger.error(f"❌ Erro HTTP {e.response.status_code}: {e}")
             if retries < self.max_retries and e.response.status_code >= 500:
                 await asyncio.sleep(2 ** retries)
-                return await self._fetch_matches_by_status(status, retries + 1)
-            return []
-            
-        except Exception as e:
-            logger.error(f"❌ Erro inesperado ao buscar partidas {status}: {e}")
-            return []
+                return await self._make_request(url, params, retries + 1)
+            raise
+    
+    async def _handle_response_errors(self, response: httpx.Response):
+        """CORREÇÃO: Tratamento melhorado de erros de resposta"""
+        if response.status_code == 400:
+            try:
+                error_data = response.json()
+                logger.error(f"❌ Erro 400 - Parâmetros inválidos: {error_data}")
+            except:
+                logger.error(f"❌ Erro 400 - Parâmetros inválidos: {response.text[:300]}")
+        elif response.status_code == 401:
+            logger.error(f"❌ Erro 401 - Token inválido ou expirado")
+        elif response.status_code == 403:
+            logger.error(f"❌ Erro 403 - Acesso negado. Verifique permissões do token")
+        elif response.status_code == 404:
+            logger.warning(f"⚠️ Erro 404 - Endpoint não encontrado")
+        elif response.status_code == 429:
+            logger.warning(f"⚠️ Rate limit atingido. Aguardando...")
+            await asyncio.sleep(60)  # Aguardar 1 minuto
+            raise httpx.HTTPStatusError("Rate limit", request=response.request, response=response)
     
     def _get_headers(self) -> Dict[str, str]:
         """Construir headers para requisições"""
@@ -302,25 +387,6 @@ class PandaScoreProvider:
             "Accept": "application/json",
             "User-Agent": "LoL-Opening-Bot/2.0"
         }
-    
-    def _build_request_params(self) -> Dict[str, str]:
-        """Construir parâmetros da requisição"""
-        params = {
-            "sort": "begin_at",
-            "per_page": str(self.per_page)
-        }
-        
-        # Filtrar por ligas se especificado
-        if self.monitored_leagues:
-            # PandaScore aceita slugs separados por vírgula
-            params["filter[league_slug]"] = ",".join(self.monitored_leagues)
-        
-        # Adicionar filtro temporal para upcoming
-        # if status == "upcoming":
-        #     future_date = (datetime.now() + timedelta(days=int(os.getenv('OPENING_LOOKAHEAD_DAYS', '14')))).isoformat()
-        #     params["filter[begin_at]"] = f"<{future_date}"
-        
-        return params
 
     def _format_matches(self, matches: List[Dict], status: str) -> List[Dict]:
         """Formata dados das partidas para o formato padrão do bot"""
@@ -332,7 +398,7 @@ class PandaScoreProvider:
                 if formatted_match:
                     formatted_matches.append(formatted_match)
             except Exception as e:
-                logger.warning(f"⚠️  Erro ao formatar partida: {e}")
+                logger.warning(f"⚠️ Erro ao formatar partida: {e}")
                 continue
         
         return formatted_matches
@@ -357,10 +423,6 @@ class PandaScoreProvider:
         league_info = match.get('league', {})
         league_name = league_info.get('name', 'Unknown League')
         league_slug = league_info.get('slug', '').lower()
-        
-        # Pular se não for liga monitorada
-        if self.monitored_leagues and league_slug not in self.monitored_leagues:
-            return None
         
         # Extrair odds
         odds_data = self._extract_odds(match.get('odds', []))
@@ -510,23 +572,17 @@ class PandaScoreProvider:
         params = {"per_page": "100"}
         
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.get(
-                    url, 
-                    params=params, 
-                    headers=self._get_headers()
-                )
-                response.raise_for_status()
-                leagues = response.json()
-                
-                logger.info(f"✅ Encontradas {len(leagues)} ligas")
+            result = await self._make_request(url, params)
+            if result:
+                logger.info(f"✅ Encontradas {len(result)} ligas")
                 
                 # Log das ligas para debugging
                 if logger.isEnabledFor(logging.DEBUG):
-                    for league in leagues[:10]:
+                    for league in result[:10]:
                         logger.debug(f"  - {league.get('name')} (slug: {league.get('slug')})")
                 
-                return leagues
+                return result
+            return []
                 
         except Exception as e:
             logger.error(f"❌ Erro ao buscar ligas: {e}")
@@ -544,6 +600,30 @@ class PandaScoreProvider:
                 return False, "Nenhuma liga encontrada"
         except Exception as e:
             return False, f"Erro na conexão: {e}"
+    
+    async def validate_api_access(self) -> bool:
+        """NOVO: Valida acesso à API com requisição de teste"""
+        try:
+            leagues = await self.get_leagues_info()
+            if not leagues:
+                logger.error("❌ Token válido, mas sem acesso a ligas")
+                return False
+            
+            logger.info(f"✅ API acessível - {len(leagues)} ligas encontradas")
+            
+            # Validar se ligas monitoradas existem
+            if self.monitored_leagues:
+                available_slugs = {league.get('slug', '').lower() for league in leagues}
+                invalid_leagues = [l for l in self.monitored_leagues if l not in available_slugs]
+                
+                if invalid_leagues:
+                    logger.warning(f"⚠️ Ligas configuradas não encontradas: {invalid_leagues}")
+                    logger.info(f"💡 Ligas disponíveis: {sorted(list(available_slugs))[:20]}")
+            
+            return True
+        except Exception as e:
+            logger.error(f"❌ Erro na validação da API: {e}")
+            return False
 
 # Factory function para criar provider baseado na configuração
 def create_provider():
@@ -555,5 +635,5 @@ def create_provider():
     elif provider_type == 'MOCK':
         return MockProvider()
     else:
-        logger.warning(f"⚠️  Provider desconhecido '{provider_type}', usando MOCK")
+        logger.warning(f"⚠️ Provider desconhecido '{provider_type}', usando MOCK")
         return MockProvider()
