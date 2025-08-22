@@ -1,0 +1,7 @@
+2025-08-22 12:14:35,642 - __main__ - INFO - Validando configurações...
+2025-08-22 12:14:35,713 - __main__ - INFO - Inicializando engine...
+2025-08-22 12:14:37,018 - httpx - INFO - HTTP Request: GET https://api.pandascore.co/lol/matches/upcoming?sort=begin_at&per_page=25&filter%5Bleague_slug%5D=lck%2Clpl%2Clec%2Clcs%2Cworlds%2Cmsi%2Ccblol "HTTP/1.1 400 Bad Request"
+2025-08-22 12:14:37,025 - httpx - INFO - HTTP Request: GET https://api.pandascore.co/lol/matches/running?sort=begin_at&per_page=25&filter%5Bleague_slug%5D=lck%2Clpl%2Clec%2Clcs%2Cworlds%2Cmsi%2Ccblol "HTTP/1.1 400 Bad Request"
+2025-08-22 12:15:07,750 - httpx - INFO - HTTP Request: GET https://api.pandascore.co/lol/matches/running?sort=begin_at&per_page=25&filter%5Bleague_slug%5D=lck%2Clpl%2Clec%2Clcs%2Cworlds%2Cmsi%2Ccblol "HTTP/1.1 400 Bad Request"
+2025-08-22 12:15:37,898 - httpx - INFO - HTTP Request: GET https://api.pandascore.co/lol/matches/upcoming?sort=begin_at&per_page=25&filter%5Bleague_slug%5D=lck%2Clpl%2Clec%2Clcs%2Cworlds%2Cmsi%2Ccblol "HTTP/1.1 400 Bad Request"
+2025-08-22 12:15:38,480 - httpx - INFO - HTTP Request: GET https://api.pandascore.co/lol/matches/running?sort=begin_at&per_page=25&filter%5Bleague_slug%5D=lck%2Clpl%2Clec%2Clcs%2Cworlds%2Cmsi%2Ccblol "HTTP/1.1 400 Bad Request"
